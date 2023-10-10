@@ -4,10 +4,10 @@ from passlib.context import CryptContext
 from pydantic import BaseModel
 import jwt
 from datetime import datetime, timedelta
-
-from models import SessionLocal, User
-
 import logging
+
+from models import async_session, User, init_db, close_db
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -30,12 +30,12 @@ def create_access_token(data: dict, expires_delta: timedelta = None):
     return encoded_jwt
 
 
-def get_db():
-    db = SessionLocal()
+async def get_db():
+    db = async_session()
     try:
         yield db
     finally:
-        db.close()
+        await db.close()
 
 
 class UserCreateUpdate(BaseModel):
@@ -48,18 +48,28 @@ class UserOutput(UserCreateUpdate):
     id: int
 
 
+@app.on_event("startup")
+async def startup_event():
+    await init_db()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await close_db()
+
+
 @app.post("/users/", response_model=UserOutput)
-def create_user(user: UserCreateUpdate, db: Session = Depends(get_db)):
+async def create_user(user: UserCreateUpdate, db: Session = Depends(get_db)):
     hashed_password = pwd_context.hash(user.password)
     db_user = User(**user, password=hashed_password)
     db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
+    await db.commit()
+    await db.refresh(db_user)
     return db_user
 
 
 @app.get("/users/{user_id}", response_model=UserOutput)
-def get_user(user_id: int, db: Session = Depends(get_db)):
+async def get_user(user_id: int, db: Session = Depends(get_db)):
     db_user = db.query(User).filter(User.id == user_id).first()
     if db_user is None:
         raise HTTPException(status_code=404, detail="NOT FOUND")
@@ -67,43 +77,43 @@ def get_user(user_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/users/", response_model=list[UserOutput])
-def get_all_users(
+async def get_all_users(
     skip: int = Query(0, alias="page",
                       discription="Skip records (pagination)"),
     limit: int = Query(10, description="Limit the number of records to fetch"),
     db: Session = Depends(get_db)
 ):
-    users = db.query(User).offset(skip).limit(limit).all()
+    users = await db.query(User).offset(skip).limit(limit).all()
     return users
 
 
 @app.put("/users/{user_id}", response_model=UserOutput)
-def update_user(user_id: int,
-                user: UserCreateUpdate, db: Session = Depends(get_db)):
-    db_user = db.query(User).filter(User.id == user_id).first()
+async def update_user(user_id: int,
+                      user: UserCreateUpdate, db: Session = Depends(get_db)):
+    db_user = await db.query(User).filter(User.id == user_id).first()
     if db_user is None:
         raise HTTPException(status_code=404, detail="NOT FOUND")
     for key, value in user.items():
         setattr(db_user, key, value)
-    db.commit()
-    db.refresh(db_user)
+    await db.commit()
+    await db.refresh(db_user)
     return db_user
 
 
 @app.delete("/users/{user_id}", response_model=UserOutput)
-def delete_user(user_id: int, db: Session = Depends(get_db)):
-    db_user = db.query(User).filter(User.id == user_id).first()
+async def delete_user(user_id: int, db: Session = Depends(get_db)):
+    db_user = await db.query(User).filter(User.id == user_id).first()
     if db_user is None:
         raise HTTPException(status_code=404, detail="NOT FOUND")
     db.delete(db_user)
-    db.commit()
+    await db.commit()
     return db_user
 
 
 @app.post("/token/")
-def login_for_access_token(db: Session = Depends(get_db),
-                           user_data: UserCreateUpdate = Depends()):
-    db_user = db.query(User).filter(
+async def login_for_access_token(db: Session = Depends(get_db),
+                                 user_data: UserCreateUpdate = Depends()):
+    db_user = await db.query(User).filter(
         User.username == user_data.username
     ).first()
     if db_user is None or not pwd_context.verify(user_data.password,
@@ -117,7 +127,7 @@ def login_for_access_token(db: Session = Depends(get_db),
 
 
 @app.get("users/filter/")
-def filter_users(
+async def filter_users(
     username: str = Query(None, description="Filter by username"),
     email: str = Query(None, description="Filter by email"),
     sort_by: str = Query("id",
@@ -125,7 +135,7 @@ def filter_users(
     order: str = Query("asc", description="Sort order (asc or desc)"),
     db: Session = Depends(get_db)
 ):
-    query = db.query(User)
+    query = await db.query(User)
     if username:
         query = query.filter(User.username == username)
     if email:
@@ -134,5 +144,5 @@ def filter_users(
         query = query.order_by(getattr(User, sort_by).desc())
     else:
         query = query.order_by(getattr(User, sort_by))
-    users = query.all()
+    users = await query.all
     return users
